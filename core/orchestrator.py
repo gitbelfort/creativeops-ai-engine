@@ -104,7 +104,7 @@ class CreativePipelineOrchestrator:
         all_passed = True
         for scene in scenes:
             report = BrandQAEngine.audit_scene(
-                prompt=scene.visual_prompt,
+                prompt=f"{scene.visual_prompt} {scene.camera_movement}",
                 negative_prompt=scene.negative_prompt,
                 duration_sec=scene.duration_sec,
                 aspect_ratio=aspect_ratio
