@@ -1,76 +1,95 @@
 import re
-from typing import List, Dict, Any
+from typing import List
 from pydantic import BaseModel, Field
 
-
-class QAResult(BaseModel):
+class QAReport(BaseModel):
     is_valid: bool
-    score: int = Field(ge=0, le=100)
-    passed_checks: List[str]
-    violations: List[str]
-    recommendations: List[str]
+    score: int
+    passed_checks: List[str] = Field(default_factory=list)
+    violations: List[str] = Field(default_factory=list)
+    recommendations: List[str] = Field(default_factory=list)
 
+class BrandQAEngine:
+    FORBIDDEN_TERMS = [
+        "ugly", "deformed", "bad quality", "lowres", "amateur",
+        "nsfw", "nude", "violence", "blood", "cheap", "glitch"
+    ]
+    
+    INJECTION_PATTERNS = [
+        r"ignore\s+(all\s+|previous\s+|prior\s+)?instructions",
+        r"disregard\s+(all\s+|previous\s+)?instructions",
+        r"system\s+override",
+        r"you\s+are\s+now\s+(unfiltered|dan|evil)",
+        r"jailbreak",
+        r"reveal\s+(your\s+)?(system\s+prompt|instructions)",
+        r"bypass\s+rules",
+        r"<script>",
+        r"DROP\s+TABLE"
+    ]
 
-class BrandGovernanceValidator:
-    def __init__(self, brand_rules: Dict[str, Any] = None):
-        self.rules = brand_rules or {
-            "forbidden_words": ["ugly", "cheap", "plastic", "deformed", "cartoonish", "glitchy"],
-            "required_negatives": ["jitter", "bent limbs", "identity drift", "subtitles", "text watermark"],
-            "max_scene_duration_sec": 8,
-            "required_camera_keywords": ["dolly", "pan", "tilt", "orbit", "static", "tracking", "crane", "push-in", "pull-out"],
-            "supported_ratios": ["16:9", "9:16", "3:4", "1:1"]
-        }
+    @classmethod
+    def audit_security(cls, text: str) -> tuple[bool, List[str]]:
+        """Scans input text for adversarial prompt injection attempts."""
+        findings = []
+        for pattern in cls.INJECTION_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE):
+                findings.append(f"Prompt Injection Signature Detected: match for '{pattern}'")
+        return (len(findings) == 0, findings)
 
-    def validate_scene_prompt(self, prompt: str, negative_prompt: str, duration: int, aspect_ratio: str) -> QAResult:
+    @classmethod
+    def audit_scene(cls, prompt: str, negative_prompt: str, duration_sec: int, aspect_ratio: str) -> QAReport:
         passed = []
         violations = []
         recommendations = []
         score = 100
 
-        # Validação de Aspect Ratio
-        if aspect_ratio in self.rules["supported_ratios"]:
+        # Aspect Ratio Validation
+        if aspect_ratio in ["9:16", "16:9", "1:1", "4:5"]:
             passed.append(f"Aspect ratio '{aspect_ratio}' is compliant.")
         else:
-            violations.append(f"Invalid aspect ratio '{aspect_ratio}'. Must be one of {self.rules['supported_ratios']}.")
+            violations.append(f"Invalid aspect ratio '{aspect_ratio}'.")
+            score -= 30
+
+        # Duration validation (SOTA diffusion model sweet spot: <= 8s)
+        if duration_sec <= 8:
+            passed.append(f"Scene duration ({duration_sec}s) complies with <= 8s engine limit.")
+        else:
+            violations.append(f"Scene duration ({duration_sec}s) exceeds stability threshold (max 8s).")
             score -= 25
 
-        # Verificação do limite de duração da cena para modelos generativos
-        if duration <= self.rules["max_scene_duration_sec"]:
-            passed.append(f"Scene duration ({duration}s) complies with <= 8s engine limit.")
-        else:
-            violations.append(f"Scene duration ({duration}s) exceeds engine threshold of {self.rules['max_scene_duration_sec']}s.")
-            score -= 20
-
-        # Filtro de vocabulário restrito no prompt positivo
-        found_forbidden = [w for w in self.rules["forbidden_words"] if re.search(rf"\b{w}\b", prompt, re.IGNORECASE)]
+        # Forbidden brand vocabulary check
+        prompt_lower = prompt.lower()
+        found_forbidden = [w for w in cls.FORBIDDEN_TERMS if w in prompt_lower]
         if not found_forbidden:
             passed.append("No forbidden brand vocabulary detected.")
         else:
-            violations.append(f"Forbidden words detected: {', '.join(found_forbidden)}")
-            score -= 25
+            violations.append(f"Forbidden terms detected: {', '.join(found_forbidden)}")
+            score -= 30
 
-        # Verificação de instrução explícita de câmera para evitar deriva
-        has_camera_motion = any(re.search(rf"\b{cw}\b", prompt, re.IGNORECASE) for cw in self.rules["required_camera_keywords"])
-        if has_camera_motion:
+        # Camera movement requirement check
+        camera_keywords = ["pan", "tilt", "dolly", "tracking", "zoom", "orbital", "pull-out", "push-in", "static", "crane", "handheld"]
+        if any(w in prompt_lower for w in camera_keywords):
             passed.append("Explicit camera movement detected (avoids static drift).")
         else:
-            recommendations.append("Consider adding explicit camera instruction (e.g., 'slow dolly-in', 'orbit').")
-            score -= 10
+            violations.append("Missing explicit camera motion keyword.")
+            recommendations.append("Add a camera motion direction (e.g. 'orbital tracking', 'dolly-in').")
+            score -= 15
 
-        # Presença de guardrails mínimos no prompt negativo
-        missing_negatives = [neg for neg in self.rules["required_negatives"] if neg.lower() not in negative_prompt.lower()]
+        # Essential negative constraints check
+        neg_lower = negative_prompt.lower()
+        essential_negatives = ["jitter", "drift", "watermark", "subtitles"]
+        missing_negatives = [n for n in essential_negatives if n not in neg_lower]
         if not missing_negatives:
             passed.append("All baseline quality negative tokens are present.")
         else:
-            recommendations.append(f"Missing recommended negative guardrails: {', '.join(missing_negatives)}")
-            score -= 15
+            violations.append(f"Missing negative guardrails: {', '.join(missing_negatives)}")
+            recommendations.append(f"Append negative tokens: {', '.join(missing_negatives)}")
+            score -= 10
 
-        score = max(score, 0)
-        is_valid = len(violations) == 0 and score >= 70
-
-        return QAResult(
-            is_valid=is_valid,
-            score=score,
+        final_score = max(0, score)
+        return QAReport(
+            is_valid=(final_score >= 80 and len(violations) == 0),
+            score=final_score,
             passed_checks=passed,
             violations=violations,
             recommendations=recommendations
